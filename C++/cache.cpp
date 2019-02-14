@@ -14,6 +14,7 @@ typedef struct cache_address {
 
 typedef struct entry{
 	uint64_t tag;
+	cache_address_t addr;
 	bool vld;
 	bool dirty;
 	uint64_t LRU;
@@ -22,6 +23,7 @@ typedef struct entry{
 typedef struct set{
 	vector<entry_t> slot;
 	uint64_t size;
+	uint64_t LRU;
 }set_t;
 
 vector<set_t> L1;	
@@ -44,8 +46,21 @@ static int blocks_per_set(uint64_t s)
 //current cache config, set upon unitialization of the cache, used until we access the last address
 struct cache_config_t *conf_g;
 
+
 void cache_init(struct cache_config_t *conf)
 {
+	
+	
+	//cout<<"Entenring Init"<<endl;
+	/*	
+	uint64_t arr[7];
+	return_next_block(0x7fe8d76f8bc8 , 30 , arr);
+	
+	for(int i = 0; i<30 ; i++){
+		
+		cout<<"0x"<< hex << arr[i]<<" R"<<endl;
+	}
+	*/
 	conf_g = conf;
 	int sets = set_count(conf->c , conf->b , conf->s);
 	int blocs = blocks_per_set(conf->s);
@@ -56,6 +71,7 @@ void cache_init(struct cache_config_t *conf)
 		for(int j=0; j<blocs; j++){
 			entry_t en;
 			en.vld = false;
+			en.dirty = false;
 			en.LRU = (uint64_t) j;
 			set_temp.slot.push_back(en);
 		}
@@ -65,10 +81,10 @@ void cache_init(struct cache_config_t *conf)
 
 	sets = set_count(conf->C , conf->b , conf->S);
 	blocs = blocks_per_set(conf->S);
-
 	for(int i = 0; i<sets; i++){
 		set_t set_temp;
 		set_temp.size = (uint64_t) blocs;
+		set_temp.LRU = 0;
 		for(int j=0; j<blocs; j++){
 			entry_t en;
 			en.vld = false;
@@ -78,6 +94,8 @@ void cache_init(struct cache_config_t *conf)
 
 		L2.push_back(set_temp);
 	}
+
+	//cout<<"Exiting Init"<<endl;
 }
 
 
@@ -92,28 +110,36 @@ static void parse_address(cache_address_t *d_addr, uint64_t addr, uint64_t c , u
 	d_addr->offset = addr & mask;	
 }
 
-uint64_t return_lru(uint64_t index , vector<set_t> LAYER){
+
+
+uint64_t return_lru(uint64_t index , set_t &set){
 	uint64_t lru;
+	//cout<<"set_size "<<set.size<<endl;	
 	
-	for(uint64_t i = 0; i < LAYER[index].size; i++){
+	for(uint64_t i = 0; i < set.size; i++){
+		if(!set.slot[i].vld){
+			return i;
+		}
+	}		
+
+	for(uint64_t i = 0; i < set.size; i++){
 		
-		//cout<<"checking lru "<<LAYER[index].slot[i].LRU <<endl;
 		
-		if(LAYER[index].slot[i].LRU == 0){
+		if(set.slot[i].LRU == 0){
 			lru = i;
 			break;
 		}
 		
-	
 	}	
 					
-	//cout<<"returned lru "<<lru <<endl;
 	return lru;
 }
 
 void set_access(set_t &set, uint64_t index, uint64_t slot_number, char rw){
 	
 	uint64_t curr_lru = set.slot[slot_number].LRU;
+	
+	//cout<<"entering set_access()"<<endl;
 	//set LRU to max
 	set.slot[slot_number].LRU = set.size - one; 
 	
@@ -122,67 +148,137 @@ void set_access(set_t &set, uint64_t index, uint64_t slot_number, char rw){
 	if(rw == 'W'){
 		set.slot[slot_number].dirty = true;
 	}
-	if(set.size > 20){
-		cout<<"something went wrong"<<endl;
-		return;
-	}
 	//decrease all other LRUs in the set
-	for(uint64_t i = curr_lru ; i < (set.size); i++){
+	for(uint64_t i = 0 ; i < (set.size); i++){
 		
-		if(set.slot[i].LRU > 0 && i != slot_number){
+		if(set.slot[i].LRU > curr_lru && i != slot_number){
 			set.slot[i].LRU = set.slot[i].LRU - one;
 			//cout<<"setting lru "<<i<<" to "<<set.slot[i].LRU<<endl; 
 		}
 
 	}
-
+	
+	//cout<<"exiting set_access()"<<endl;
 }
+
+
+bool check_cache(set_t &set , cache_address_t cache_addr , char rw){
+	
+	
+	bool hit = false , vld;	
+	for(uint64_t i = 0; i< set.size; i++){
+	
+		vld = set.slot[i].vld;	
+		if(vld){
+			if(cache_addr.tag == set.slot[i].tag){
+				set_access(set, cache_addr.index , i, rw);
+				hit = true;
+				break;
+			}
+		}
+	}
+	
+
+	return hit;
+}
+
+//loads and returns an eviction
+entry_t load_address(set_t &set, cache_address_t cache_addr){
+	
+	entry_t evict;
+	uint64_t LRU = return_lru(cache_addr.index , set);
+	cout<<"L2 cache miss " <<"LRU for eviction "<<LRU<<" age "<<set.slot[LRU].LRU<<endl<<flush;
+	
+	evict = set.slot[LRU];	
+	
+	set.slot[LRU].tag = cache_addr.tag;
+	set.slot[LRU].vld = true;
+	set.slot[LRU].addr = cache_addr;
+
+	//L1[cache_addr.index].slot[LRU].LRU = 0;
+	//set_access(L2[cache_addr2.index] , cache_addr.index , LRU , rw);
+
+	return evict;
+}
+
+void return_next_block(uint64_t address , int k , cache_address_t arr[]){
+	
+	uint64_t mask = 0x3F;	
+	address = address & ~(mask);
+	cache_address_t cache_addr;
+	for(int i = 0; i<k ; i++){
+		
+		address = address + 0x40;
+		parse_address(&cache_addr , address , conf_g->C , conf_g->b, conf_g->S);
+		arr[i] = cache_addr;
+	}
+}
+
+
 
 void cache_access(uint64_t addr, char rw, struct cache_stats_t *stats)
 {
+	
+	stats->num_accesses++;	
+	//cout<<"Entering Cache Access"<<endl;
 	cache_address_t cache_addr , cache_addr2;
 
 	parse_address(&cache_addr , addr , conf_g->c , conf_g->b, conf_g->s);
 	parse_address(&cache_addr2 , addr , conf_g->C , conf_g->b, conf_g->S);
 	
-	bool vld, hit=false;
+	bool  hit=false;
 	
-	uint64_t set_size = (uint64_t) blocks_per_set(conf_g->s);
-	
-	for(uint64_t i = 0; i<set_size; i++){
-	
-		vld = L1[cache_addr.index].slot[i].vld;	
-		if(vld){
-			if(cache_addr.tag == L1[cache_addr.index].slot[i].tag){
-				set_access(L1[cache_addr.index] , cache_addr.index , i, rw);
-			}
-		}
-				
 		
-	}
+	hit = check_cache(L1[cache_addr.index] , cache_addr , rw);	
+	
+	entry_t evict; 	
 	//if not in L1, search L2
 	if(!hit){	
-		set_size = (uint64_t) blocks_per_set(conf_g->S);
-		for(uint64_t i = 0; i<set_size; i++){
 		
-			vld = L2[cache_addr2.index].slot[i].vld;	
-			if(vld){
-				if(cache_addr2.tag == L2[cache_addr2.index].slot[i].tag){
-					set_access(L2[cache_addr2.index], cache_addr.index , i, rw);
+
+		hit = check_cache(L2[cache_addr2.index] , cache_addr2,  rw);
+		
+		//not in L2 we do prefecthing for k blocks
+		if(!hit){
+			int k = (int) conf_g->k;
+			stats->num_misses_l2++;
+			if(k == 0){
+				
+				evict = load_address(L2[cache_addr2.index] , cache_addr2);	
+				
+				if(evict.dirty){		
+					stats->num_write_backs++;	
+					//cout<<"Writing Dirty Block To Memory "<<endl;
+				}
+			}else{
+			
+				cache_address_t arr[10];
+
+				return_next_block(addr , k , arr);
+				
+				for(int i=0; i<k; i++){	
+					if(!check_cache(L2[arr[i].index] , arr[i] , rw)){	
+						evict = load_address(L2[arr[i].index] , arr[i]);	
+						
+						if(evict.dirty){		
+							stats->num_write_backs++;
+						}
+					}
+				}
+			}	
+		}else{
+			evict = load_address(L1[cache_addr.index] , cache_addr);
+			//if dirty in L1 and block not present in L2 write to L2
+			if(evict.vld && evict.dirty && !check_cache(L2[cache_addr.index] , cache_addr , rw)){		
+				//cout<<"Writing Dirty Block To L2 "<<endl;
+				evict = load_address(L2[cache_addr2.index] , cache_addr);
+				//If dirty in L2 write to memory
+				if(evict.dirty){
+					
+					stats->num_write_backs++;
+					//cout<<"Writing Dirty Block To Memory "<<endl;
 				}
 			}
-		}
-		//not in L2
-		if(!hit){
-			uint64_t LRU = return_lru(cache_addr2.index , L2);
-			
-			cout<<"LRU for eviction "<<LRU<<" age "<<L2[cache_addr2.index].slot[LRU].LRU<<endl<<flush;
-			L2[cache_addr2.index].slot[LRU].tag = cache_addr2.tag;
-			L2[cache_addr2.index].slot[LRU].vld = true;
-			set_access(L2[cache_addr2.index] , cache_addr.index , LRU , rw);
-			
-			cout<<"set to "<<L2[cache_addr2.index].slot[LRU].LRU<<" slot at "<<LRU<< " at index "<<cache_addr.index<<endl; 
-			
 		}	
 	}
 	
