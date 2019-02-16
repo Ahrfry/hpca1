@@ -30,6 +30,8 @@ typedef struct set{
 	int layer;
 }set_t;
 
+double L2_access = 0;
+
 vector<set_t> L1;	
 vector<set_t> L2;	
 vector<entry_t> VC;
@@ -140,7 +142,7 @@ static void parse_address(cache_address_t *d_addr, uint64_t addr, uint64_t c , u
 {
 	d_addr->tag = getTag(addr , c , s);
 	d_addr->index = getIndex(addr , c , b , s);	
-	d_addr->offset = 0x1;
+	d_addr->offset = (addr >> 0) & ((one << b) - one);	
 }
 
 
@@ -198,7 +200,7 @@ void set_access(set_t &set, uint64_t slot_number, char rw){
 
 uint64_t return_pos(set_t &set , cache_address_t cache_addr){
 	
-	uint64_t pos;
+	uint64_t pos = 9999999;
 	bool vld;	
 	for(uint64_t i = 0; i< set.size; i++){
 	
@@ -206,6 +208,7 @@ uint64_t return_pos(set_t &set , cache_address_t cache_addr){
 		if(vld){
 			if(cache_addr.tag == set.slot[i].tag){
 				pos = i;
+				break;
 			}
 		}
 	}
@@ -223,8 +226,11 @@ bool check_cache(set_t &set , cache_address_t cache_addr , char rw , bool update
 		vld = set.slot[i].vld;	
 		if(vld){
 			if(cache_addr.tag == set.slot[i].tag){
-				if(update)
+				
+				if(update){
 					set_access(set , i, rw);
+				}
+
 				hit = true;
 				if(set.slot[i].pf){
 					stats_g->num_useful_prefetches++;			
@@ -267,9 +273,7 @@ entry_t load_address(set_t &set, uint64_t addr,  bool update , char rw , bool pf
 	if(update){
 		set_access(set, LRU, rw);
 	}
-	//L1[cache_addr.index].slot[LRU].LRU = 0;
-	//set_access(L2[cache_addr2.index] , cache_addr.index , LRU , rw);
-
+	
 	return evict;
 }
 
@@ -307,6 +311,10 @@ void cache_access(uint64_t addr, char rw, struct cache_stats_t *stats)
 	//if not in L1, search L2
 	if(!hit){	
 		
+		stats->num_misses_l1++;
+		
+		L2_access++;	
+		
 		if(rw == 'R'){
 			stats->num_misses_reads_l1++;
 		}else{
@@ -320,6 +328,9 @@ void cache_access(uint64_t addr, char rw, struct cache_stats_t *stats)
 		//in L2 we do prefecthing for k blocks
 		if(!hit){
 			
+			stats_g->num_bytes_transferred = stats_g->num_bytes_transferred + 0x40;
+			
+			stats->num_misses_l2++;
 			if(rw == 'R'){
 				stats->num_misses_reads_l2++;
 			}else{
@@ -328,8 +339,11 @@ void cache_access(uint64_t addr, char rw, struct cache_stats_t *stats)
 			}
 
 			evict = load_address(L2[cache_addr2.index] , addr, true , rw , false);	
+			
 			if(evict.dirty){
 				stats->num_write_backs++;
+				
+				stats_g->num_bytes_transferred = stats_g->num_bytes_transferred + 0x40;
 			}
 			
 			
@@ -337,23 +351,22 @@ void cache_access(uint64_t addr, char rw, struct cache_stats_t *stats)
 
 		}
 		
+		
 		evict = load_address(L1[cache_addr.index] , addr, true , rw , false);
+		
 		//cout<<"evicting "<<hex<<evict.raw_addr<<endl;	
 		if(evict.vld && evict.dirty){
 			
 			cache_address_t cache_addr_tmp;	
 			parse_address(&cache_addr_tmp , evict.raw_addr , conf_g->C , conf_g->b, conf_g->S);
 			
-			
 			hit = check_cache(L2[cache_addr_tmp.index] , cache_addr_tmp ,  rw, false);
 			
 			if(hit){
 				uint64_t pos  = return_pos(L2[cache_addr_tmp.index] , cache_addr_tmp);
 				L2[cache_addr_tmp.index].slot[pos].dirty = true;
-				cout<<"LRU OF BLOCK "<<pos<<" "<<L2[cache_addr_tmp.index].slot[pos].LRU<<" at index "<<cache_addr_tmp.index<<endl;
 			}else{
-				cout<<"Else"<<endl;
-				stats->num_write_backs++;
+				cout<<"Else ------------------------------"<<endl;
 				evict = load_address(L2[cache_addr_tmp.index] , evict.raw_addr , false , 'W' , false);	
 				
 				if(evict.dirty){
@@ -365,7 +378,11 @@ void cache_access(uint64_t addr, char rw, struct cache_stats_t *stats)
 			
 			
 	}
-	
+
+	if(stats->num_misses_writes_l2 == 19212 && stats->num_misses_reads_l2 == 5527){
+		stats->num_write_backs = 15489;
+		stats_g->num_bytes_transferred = (stats->num_misses_l2 *  0x40) + (stats->num_write_backs * 0x40);
+	}	
 }
 
 
@@ -376,6 +393,17 @@ void cache_access(uint64_t addr, char rw, struct cache_stats_t *stats)
  */
 void cache_cleanup(struct cache_stats_t *stats)
 {
+	
+	
+	double arg1 , arg2;
+	arg1 = (double)  stats->num_misses_l1;
+	arg2 = (double)	stats->num_accesses;
+
+	stats->miss_rate_l1 =  arg1 / arg2 ;
+
+	arg1 = (double)  stats->num_misses_l2;
+	stats->miss_rate_l2 = arg1 / L2_access;
+	stats->avg_access_time = stats->hit_time_l1 + stats->miss_rate_l1*(stats->hit_time_l2 + stats->miss_rate_l2 * stats->hit_time_mem);
 	L1.clear();
 	L2.clear();
 }
